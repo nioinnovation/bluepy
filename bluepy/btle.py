@@ -6,6 +6,10 @@ import os
 import time
 import subprocess
 import binascii
+import time
+import select
+from threading import Event, Lock, Thread
+
 
 Debugging = False
 helperExe = os.path.join(os.path.abspath(os.path.dirname(__file__)), "bluepy-helper")
@@ -131,11 +135,14 @@ class Descriptor:
 
 class Peripheral:
     def __init__(self, deviceAddr=None):
+        self._addr = deviceAddr
         self._helper = None
         self.services = {} # Indexed by UUID
         self.discoveredAllServices = False
         if deviceAddr is not None:
             self.connect(deviceAddr)
+        else:
+            self._startHelper()
 
     def _startHelper(self):
         if self._helper is None:
@@ -161,9 +168,9 @@ class Peripheral:
         self._helper.stdin.write(cmd)
         self._helper.stdin.flush()
 
-
     @staticmethod
     def parseResp(line):
+        # print("stuff", line)
         resp = {}
         for item in line.rstrip().split(' '):
             (tag, tval) = item.split('=')
@@ -190,6 +197,16 @@ class Peripheral:
             if self._helper.poll() is not None:
                 raise BTLEException(BTLEException.INTERNAL_ERROR, "Helper exited")
 
+
+            rv = ''
+            # if timeout is not None:
+            #     rlist, wlist, xlist = select.select(
+            #         [self._helper.stdout], [], [], timeout)
+            #     if rlist:
+            #         rv = rlist[0].readline()
+            #     else:
+            #         return None
+            # else:
             rv = self._helper.stdout.readline()
             DBG("Got:", repr(rv))
             if rv.startswith('#'):
@@ -212,6 +229,8 @@ class Peripheral:
                 DBG("Ignoring notification")
                 continue
             else:
+                # from traceback import print_stack
+                # print_stack()
                 raise BTLEException(BTLEException.INTERNAL_ERROR, "Unexpected response (%s)" % respType)
 
     def status(self):
@@ -316,6 +335,28 @@ class Peripheral:
 
     def __del__(self):
         self.disconnect()
+
+class LEScanner(Peripheral):
+    def __init__(self, common_name='', timeout=10):
+        super().__init__()
+        self._common_name = common_name
+        self._timeout = timeout
+        self._devices = []
+
+    def collect_devices(self):
+        while True:
+            device = self._getResp('scan')
+            if device.get('done') is not None:
+                print('{} device scan ended after {} seconds'.format(
+                        self._common_name, self._timeout))
+                break
+            elif self._common_name in device['name']:
+                self._devices.extend(device['addr'])
+
+    def scan(self):
+        self._writeCmd("scan {}\n".format(self._timeout))
+        self.collect_devices()
+        self._stopHelper()
 
 def capitaliseName(descr):
     words = descr.split(" ")

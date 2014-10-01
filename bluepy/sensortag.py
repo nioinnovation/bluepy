@@ -1,4 +1,4 @@
-from btle import UUID, Peripheral
+from .btle import UUID, Peripheral
 import struct
 import math
 
@@ -10,8 +10,9 @@ class SensorBase:
     sensorOn  = struct.pack("B", 0x01)
     sensorOff = struct.pack("B", 0x00)
 
-    def __init__(self, periph):
+    def __init__(self, periph, ident):
         self.periph = periph
+        self.ident = ident
         self.service = self.periph.getServiceByUUID(self.svcUUID)
         self.ctrl = None
         self.data = None
@@ -48,7 +49,7 @@ class IRTemperatureSensor(SensorBase):
     Cpoly = [0.0,      1.0,      13.4]
 
     def __init__(self, periph):
-        SensorBase.__init__(self, periph)
+        SensorBase.__init__(self, periph, 'IRtemperature')
         self.S0 = 6.4e-14
 
     def read(self):
@@ -74,7 +75,7 @@ class AccelerometerSensor(SensorBase):
     ctrlUUID = _TI_UUID(0xAA12)
 
     def __init__(self, periph):
-        SensorBase.__init__(self, periph)
+        SensorBase.__init__(self, periph, 'accelerometer')
 
     def read(self):
         '''Returns (x_accel, y_accel, z_accel) in units of g'''
@@ -87,7 +88,7 @@ class HumiditySensor(SensorBase):
     ctrlUUID = _TI_UUID(0xAA22)
 
     def __init__(self, periph):
-        SensorBase.__init__(self, periph)
+        SensorBase.__init__(self, periph, 'humidity')
 
     def read(self):
         '''Returns (ambient_temp, rel_humidity)'''
@@ -103,7 +104,7 @@ class MagnetometerSensor(SensorBase):
     ctrlUUID = _TI_UUID(0xAA32)
 
     def __init__(self, periph):
-        SensorBase.__init__(self, periph)
+        SensorBase.__init__(self, periph, 'magnetometer')
 
     def read(self):
         '''Returns (x, y, z) in uT units'''
@@ -119,7 +120,7 @@ class BarometerSensor(SensorBase):
     sensorOn = None
 
     def __init__(self, periph):
-       SensorBase.__init__(self, periph)
+       SensorBase.__init__(self, periph, 'barometer')
 
     def enable(self):
         SensorBase.enable(self)
@@ -152,7 +153,7 @@ class GyroscopeSensor(SensorBase):
     sensorOn = struct.pack("B",0x07)
 
     def __init__(self, periph):
-       SensorBase.__init__(self, periph)
+       SensorBase.__init__(self, periph, 'gyroscope')
 
     def read(self):
         '''Returns (x,y,z) rate in deg/sec'''
@@ -176,6 +177,7 @@ class SensorTag(Peripheral):
         self.barometer = BarometerSensor(self)
         self.gyroscope = GyroscopeSensor(self)
         # self.keypress = KeypressSensor(self)
+
 
 if __name__ == "__main__":
     import time

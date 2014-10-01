@@ -31,6 +31,7 @@
 #include <stdio.h>
 #include <assert.h>
 #include <glib.h>
+#include <time.h>
 
 
 #include "lib/uuid.h"
@@ -39,6 +40,16 @@
 #include "gattrib.h"
 #include "gatt.h"
 #include "gatttool.h"
+#include "hci.h"
+#include "hci_lib.h"
+
+
+#define FLAGS_AD_TYPE 0x01
+#define FLAGS_LIMITED_MODE_BIT 0x01
+#define FLAGS_GENERAL_MODE_BIT 0x02
+
+#define EIR_NAME_SHORT              0x08  /* shortened local name */
+#define EIR_NAME_COMPLETE           0x09  /* complete local name */
 
 static GIOChannel *iochannel = NULL;
 static GAttrib *attrib = NULL;
@@ -62,6 +73,8 @@ struct characteristic_data {
 
 static void cmd_help(int argcp, char **argvp);
 
+static volatile int signal_received = 0;
+
 static enum state {
 	STATE_DISCONNECTED=0,
 	STATE_CONNECTING=1,
@@ -82,7 +95,10 @@ static const char
   *tag_RANGE_START = "hstart",
   *tag_RANGE_END = "hend",
   *tag_PROPERTIES= "props",
-  *tag_VALUE_HANDLE = "vhnd";
+  *tag_VALUE_HANDLE = "vhnd",
+  *tag_ADDR = "addr",
+  *tag_NAME = "name",
+  *tag_DONE = "done";
 
 static const char
   *rsp_ERROR     = "err",
@@ -92,7 +108,8 @@ static const char
   *rsp_DISCOVERY = "find",
   *rsp_DESCRIPTORS = "desc",
   *rsp_READ      = "rd",
-  *rsp_WRITE     = "wr";
+  *rsp_WRITE     = "wr",
+  *rsp_SCAN      = "scan";
 
 static const char
   *err_CONN_FAIL = "connfail",
@@ -851,6 +868,250 @@ static void cmd_mtu(int argcp, char **argvp)
 	gatt_exchange_mtu(attrib, opt_mtu, exchange_mtu_cb, NULL);
 }
 
+static int read_flags(uint8_t *flags, const uint8_t *data, size_t size)
+{
+        size_t offset;
+
+        if (!flags || !data)
+                return -EINVAL;
+
+        offset = 0;
+        while (offset < size) {
+                uint8_t len = data[offset];
+                uint8_t type;
+
+                /* Check if it is the end of the significant part */
+                if (len == 0)
+                        break;
+
+                if (len + offset > size)
+                        break;
+
+                type = data[offset + 1];
+
+                if (type == FLAGS_AD_TYPE) {
+                        *flags = data[offset + 2];
+                        return 0;
+                }
+
+                offset += 1 + len;
+        }
+
+        return -ENOENT;
+}
+
+static int check_report_filter(uint8_t procedure, le_advertising_info *info)
+{
+        uint8_t flags;
+
+        /* If no discovery procedure is set, all reports are treat as valid */
+        if (procedure == 0)
+                return 1;
+
+        /* Read flags AD type value from the advertising report if it exists */
+        if (read_flags(&flags, info->data, info->length))
+                return 0;
+
+        switch (procedure) {
+        case 'l': /* Limited Discovery Procedure */
+                if (flags & FLAGS_LIMITED_MODE_BIT)
+                        return 1;
+                break;
+        case 'g': /* General Discovery Procedure */
+                if (flags & (FLAGS_LIMITED_MODE_BIT | FLAGS_GENERAL_MODE_BIT))
+                        return 1;
+                break;
+        default:
+                fprintf(stderr, "Unknown discovery procedure\n");
+        }
+
+        return 0;
+}
+
+static void sigint_handler(int sig)
+{
+        signal_received = sig;
+}
+
+static void eir_parse_name(uint8_t *eir, size_t eir_len,
+			   char *buf, size_t buf_len)
+{
+        size_t offset;
+
+        offset = 0;
+        while (offset < eir_len) {
+                uint8_t field_len = eir[0];
+                size_t name_len;
+
+                /* Check for the end of EIR */
+                if (field_len == 0)
+                        break;
+
+                if (offset + field_len > eir_len)
+                        goto failed;
+
+                switch (eir[1]) {
+                case EIR_NAME_SHORT:
+                case EIR_NAME_COMPLETE:
+                        name_len = field_len - 1;
+                        if (name_len > buf_len)
+			        goto failed;
+
+                        memcpy(buf, &eir[2], name_len);
+                        return;
+                }
+
+                offset += field_len + 1;
+                eir += field_len + 1;
+        }
+
+ failed:
+        snprintf(buf, buf_len, "(unknown)");
+}
+
+static int print_advertising_devices(int dd, uint8_t filter_type, int timeout)
+{
+        unsigned char buf[HCI_MAX_EVENT_SIZE], *ptr;
+        struct hci_filter nf, of;
+        struct sigaction sa;
+        socklen_t olen;
+        int len;
+	time_t start_time;
+	time(&start_time);
+
+        olen = sizeof(of);
+        if (getsockopt(dd, SOL_HCI, HCI_FILTER, &of, &olen) < 0) {
+                perror("Could not get socket options\n");
+                return -1;
+        }
+
+        hci_filter_clear(&nf);
+        hci_filter_set_ptype(HCI_EVENT_PKT, &nf);
+        hci_filter_set_event(EVT_LE_META_EVENT, &nf);
+
+        if (setsockopt(dd, SOL_HCI, HCI_FILTER, &nf, sizeof(nf)) < 0) {
+                perror("Could not set socket options\n");
+                return -1;
+        }
+
+        memset(&sa, 0, sizeof(sa));
+        sa.sa_flags = SA_NOCLDSTOP;
+        sa.sa_handler = sigint_handler;
+        sigaction(SIGINT, &sa, NULL);
+
+
+        while (1) {
+                evt_le_meta_event *meta;
+                le_advertising_info *info;
+                char addr[18];
+		time_t current_time;
+		time(&current_time);
+		if (difftime(current_time, start_time) > timeout){
+		        resp_begin(rsp_SCAN);
+		        send_uint(tag_DONE, timeout);
+		        resp_end();
+		        goto done;
+		}
+
+                while ((len = read(dd, buf, sizeof(buf))) <= 0) {
+		        
+                        if (errno == EINTR && signal_received == SIGINT) {
+			        len = 0;
+				goto done;
+                        }
+
+                        if (errno == EAGAIN || errno == EINTR) {
+			        continue;
+			}
+                        goto done;
+                }
+                ptr = buf + (1 + HCI_EVENT_HDR_SIZE);
+                len -= (1 + HCI_EVENT_HDR_SIZE);
+
+                meta = (void *) ptr;
+
+                if (meta->subevent != 0x02)
+                        goto done;
+
+                /* Ignoring multiple reports */
+                info = (le_advertising_info *) (meta->data + 1);
+                if (check_report_filter(filter_type, info)) {
+                        char name[30];
+
+                        memset(name, 0, sizeof(name));
+
+                        ba2str(&info->bdaddr, addr);
+                        eir_parse_name(info->data, info->length,
+		                 name, sizeof(name) - 1);
+			
+			resp_begin(rsp_SCAN);
+			send_str(tag_NAME, name);
+			send_str(tag_ADDR, addr);
+			resp_end();
+                }
+        }
+
+ done:
+        setsockopt(dd, SOL_HCI, HCI_FILTER, &of, sizeof(of));
+
+        if (len < 0)
+                return -1;
+
+        return 0;
+}
+
+
+static void cmd_lescan(int argcp, char **argvp)
+{
+        int err, opt, dd;
+        uint8_t own_type = 0x00;
+        uint8_t scan_type = 0x01;
+        uint8_t filter_type = 0;
+        uint8_t filter_policy = 0x00;
+        uint16_t interval = htobs(0x0010);
+        uint16_t window = htobs(0x0010);
+        uint8_t filter_dup = 1;
+	int dev_id = -1;
+	int timeout = atoi(argvp[1]);
+	static const char *no_help = "";
+	
+        if (dev_id < 0)
+                dev_id = hci_get_route(NULL);
+
+        dd = hci_open_dev(dev_id);
+        if (dd < 0) {
+                perror("Could not open device");
+                exit(1);
+        }
+
+        err = hci_le_set_scan_parameters(dd, scan_type, interval, window,
+				         own_type, filter_policy, 1000);
+        if (err < 0) {
+                perror("Set scan parameters failed");
+                exit(1);
+        }
+
+        err = hci_le_set_scan_enable(dd, 0x01, filter_dup, 1000);
+        if (err < 0) {
+                perror("Enable scan failed");
+                exit(1);
+        }
+
+        err = print_advertising_devices(dd, filter_type, timeout);
+        if (err < 0) {
+                perror("Could not receive advertising events");
+                exit(1);
+        }
+
+        err = hci_le_set_scan_enable(dd, 0x00, filter_dup, 1000);
+        if (err < 0) {
+                perror("Disable scan failed");
+                exit(1);
+        }
+
+        hci_close_dev(dd);
+}
+
 static struct {
 	const char *cmd;
 	void (*func)(int argcp, char **argvp);
@@ -887,6 +1148,8 @@ static struct {
 		"Set security level. Default: low" },
 	{ "mtu",		cmd_mtu,	"<value>",
 		"Exchange MTU for GATT/ATT" },
+	{ "scan",               cmd_lescan,     "<timeout>",
+	        "Scan for Low Energy devices"},
 	{ NULL, NULL, NULL}
 };
 
