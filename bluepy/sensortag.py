@@ -1,28 +1,47 @@
-from btle import UUID, Peripheral
+from .btle import UUID, Peripheral
 import struct
 import math
 
 def _TI_UUID(val):
     return UUID("%08X-0451-4000-b000-000000000000" % (0xF0000000+val))
 
+def _GATT_UUID(val):
+    return UUID("%08X-0000-1000-8000-00805f9b34fb" % (0x00000000+val))
+
 class SensorBase:
     # Derived classes should set: svcUUID, ctrlUUID, dataUUID
     sensorOn  = struct.pack("B", 0x01)
     sensorOff = struct.pack("B", 0x00)
+    notifyOn  = struct.pack("BB", 0x01, 0x00)
+    nofifyOff = struct.pack("BB", 0x00, 0x00)
 
     def __init__(self, periph):
         self.periph = periph
         self.service = self.periph.getServiceByUUID(self.svcUUID)
+        # if self.notificationUUID[d.uuid for d in self.periph.getDescriptors(startHnd=37, endHnd=39)]
+        # print(self.notificationUUID)
+        # self.notify = self.periph.getServiceByUUID(self.notificationUUID)
+
         self.ctrl = None
         self.data = None
 
-    def enable(self):
+    def enable(self, notification=False):
         if self.ctrl is None:
             self.ctrl = self.service.getCharacteristics(self.ctrlUUID) [0]
         if self.data is None:
             self.data = self.service.getCharacteristics(self.dataUUID) [0]
+            print("enters")
+            print(self.periph.readCharacteristic(0x26))
+            self.periph.writeCharacteristic(0x26, self.notifyOn)
+            # [print(c) for c in self.periph.getCharacteristics()]
+            # print("service characteristics")
+            # [print(c) for c in self.service.getCharacteristics()]
+
+            
+        # if notification and self.notifyOn is not None:
+        #     self.periph.writeCharacteristic(0x26, self.notifyOn, withResponse=True)
         if self.sensorOn is not None:
-            self.ctrl.write(self.sensorOn,withResponse=True)
+            self.ctrl.write(self.sensorOn, withResponse=True)
 
     def read(self):
         return self.data.read()
@@ -41,6 +60,12 @@ class IRTemperatureSensor(SensorBase):
     dataUUID = _TI_UUID(0xAA01)
     ctrlUUID = _TI_UUID(0xAA02)
 
+    notificationUUID = _GATT_UUID(0x2902)
+    # svcUUIDnotify  = _TI_UUID(0x2800)
+    # dataUUIDnotify = _TI_UUID(0x2901)
+    # ctrlUUIDnotify = _TI_UUID(0x2902)
+
+
     zeroC = 273.15 # Kelvin
     tRef  = 298.15
     Apoly = [1.0,      1.75e-3, -1.678e-5]
@@ -56,6 +81,23 @@ class IRTemperatureSensor(SensorBase):
 
         # See http://processors.wiki.ti.com/index.php/SensorTag_User_Guide#IR_Temperature_Sensor
         (rawVobj, rawTamb) = struct.unpack('<hh', self.data.read())
+        print(rawVobj, rawTamb)
+        tAmb = rawTamb / 128.0
+        print(tAmb)
+        Vobj = 1.5625e-7 * rawVobj
+
+        tDie = tAmb + self.zeroC
+        print(tDie)
+        S   = self.S0 * calcPoly(self.Apoly, tDie-self.tRef)
+        Vos = calcPoly(self.Bpoly, tDie-self.tRef)
+        fObj = calcPoly(self.Cpoly, Vobj-Vos)
+
+        tObj = math.pow( math.pow(tDie,4.0) + (fObj/S), 0.25 )
+        print(tObj)
+        return (tAmb, tObj - self.zeroC)
+
+    def process_tmp(self, tmp):
+        (rawVobj, rawTamb) = tmp
         tAmb = rawTamb / 128.0
         Vobj = 1.5625e-7 * rawVobj
 
@@ -159,12 +201,19 @@ class GyroscopeSensor(SensorBase):
         x_y_z = struct.unpack('<hhh', self.data.read())
         return tuple([ 250.0 * (v/32768.0) for v in x_y_z ])
 
-#class KeypressSensor(SensorBase):
-# TODO: only sends notifications, you can't poll it
-#    svcUUID = UUID(0xFFE0)
-# write 0100 to 0x60
-# get notifications on 5F
+class KeypressSensor(SensorBase):
+    # TODO: only sends notifications, you can't poll it
+    #    svcUUID = UUID(0xFFE0)
+    # write 0100 to 0x60
+    # get notifications on 5F
+    def __init__(self, periph):
+        self.periph = periph
 
+    def enable(self):
+        print(self.periph.readCharacteristic(0x6c))
+        self.periph.monitorNotifications()
+        # self.periph.writeCharacteristic(0x6c, self.notifyOn)
+    
 class SensorTag(Peripheral):
     def __init__(self,addr):
         Peripheral.__init__(self,addr)
@@ -175,7 +224,7 @@ class SensorTag(Peripheral):
         self.magnetometer = MagnetometerSensor(self)
         self.barometer = BarometerSensor(self)
         self.gyroscope = GyroscopeSensor(self)
-        # self.keypress = KeypressSensor(self)
+        self.keypress = KeypressSensor(self)
 
 if __name__ == "__main__":
     import time

@@ -6,6 +6,7 @@ import os
 import time
 import subprocess
 import binascii
+import struct
 
 Debugging = False
 helperExe = os.path.join(os.path.abspath(os.path.dirname(__file__)), "bluepy-helper")
@@ -111,6 +112,7 @@ class Characteristic:
         self.uuid = UUID(uuidVal)
 
     def read(self):
+        print('reading characteristic')
         return self.peripheral.readCharacteristic(self.valHandle)
 
     def write(self, val, withResponse=False):
@@ -161,6 +163,8 @@ class Peripheral:
         self._helper.stdin.write(cmd)
         self._helper.stdin.flush()
 
+    def monitorNotifications(self):
+        self._getResp('ntfy')
 
     @staticmethod
     def parseResp(line):
@@ -201,6 +205,8 @@ class Peripheral:
                                 "No response type indicator")
             respType = resp['rsp'][0]
             if respType == wantType:
+                if respType == 'ntfy':
+                    print(resp)
                 return resp
             elif respType == 'stat' and resp['state'][0] == 'disc':
                 self._stopHelper()
@@ -209,6 +215,9 @@ class Peripheral:
                 errcode=resp['code'][0]
                 raise BTLEException(BTLEException.COMM_ERROR, "Error from Bluetooth stack (%s)" % errcode)
             elif respType == 'ntfy':
+                print("Notification received and ignored")
+                print(resp)
+                print(struct.unpack('<HH', resp['d'][0]))
                 DBG("Ignoring notification")
                 continue
             else:
@@ -245,6 +254,8 @@ class Peripheral:
         starts = rsp['hstart']
         ends   = rsp['hend']
         uuids  = rsp['uuid']
+        for i in uuids:
+            print(i)
         nSvcs = len(uuids)
         assert(len(starts)==nSvcs and len(ends)==nSvcs)
         self.services = {}
@@ -260,10 +271,12 @@ class Peripheral:
 
     def getServiceByUUID(self, uuidVal):
         uuid = UUID(uuidVal)
+        # print(uuid)
         if uuid in self.services:
             return self.services[uuid]
         self._writeCmd("svcs %s\n" % uuid)
         rsp = self._getResp('find')
+        print(rsp)
         svc = Service(self, uuid, rsp['hstart'][0], rsp['hend'][0])
         self.services[uuid] = svc
         return svc
