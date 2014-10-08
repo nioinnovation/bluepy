@@ -8,6 +8,7 @@ import subprocess
 import binascii
 import time
 import select
+import re
 from threading import Event, Lock, Thread
 
 
@@ -346,17 +347,19 @@ class LEScanner(Peripheral):
     def collect_devices(self):
         while True:
             device = self._getResp('scan')
-            if device.get('done') is not None:
-                print('{} device scan ended after {} seconds'.format(
-                        self._common_name, self._timeout))
+            is_done = device.get('done')
+            if is_done is not None:
+                return is_done[0]
                 break
-            elif self._common_name in device['name']:
+            elif True in [re.search(self._common_name, name) is not None \
+                              for name in device['name']]:
                 self._devices.extend(device['addr'])
 
     def scan(self):
+        self._startHelper()
         self._writeCmd("scan {}\n".format(self._timeout))
-        self.collect_devices()
-        self._stopHelper()
+        timeout = self.collect_devices()
+        return timeout
 
 def capitaliseName(descr):
     words = descr.split(" ")

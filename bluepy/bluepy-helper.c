@@ -1005,10 +1005,12 @@ static int print_advertising_devices(int dd, uint8_t filter_type, int timeout)
                 le_advertising_info *info;
                 char addr[18];
 		time_t current_time;
+		time_t delta_t;
 		time(&current_time);
-		if (difftime(current_time, start_time) > timeout){
+		delta_t = difftime(current_time, start_time);
+		if (delta_t >= timeout){
 		        resp_begin(rsp_SCAN);
-		        send_uint(tag_DONE, timeout);
+		        send_uint(tag_DONE, delta_t);
 		        resp_end();
 		        goto done;
 		}
