@@ -171,7 +171,6 @@ class Peripheral:
 
     @staticmethod
     def parseResp(line):
-        # print("stuff", line)
         resp = {}
         for item in line.rstrip().split(' '):
             (tag, tval) = item.split('=')
@@ -198,16 +197,6 @@ class Peripheral:
             if self._helper.poll() is not None:
                 raise BTLEException(BTLEException.INTERNAL_ERROR, "Helper exited")
 
-
-            rv = ''
-            # if timeout is not None:
-            #     rlist, wlist, xlist = select.select(
-            #         [self._helper.stdout], [], [], timeout)
-            #     if rlist:
-            #         rv = rlist[0].readline()
-            #     else:
-            #         return None
-            # else:
             rv = self._helper.stdout.readline()
             DBG("Got:", repr(rv))
             if rv.startswith('#'):
@@ -230,8 +219,6 @@ class Peripheral:
                 DBG("Ignoring notification")
                 continue
             else:
-                # from traceback import print_stack
-                # print_stack()
                 raise BTLEException(BTLEException.INTERNAL_ERROR, "Unexpected response (%s)" % respType)
 
     def status(self):
