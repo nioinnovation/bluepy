@@ -348,6 +348,12 @@ class LEScanner(Peripheral):
         timeout = self.collect_devices()
         return timeout
 
+    def stop(self):
+        self._stopHelper()
+
+    def __del__(self):
+        self._stopHelper()
+
 def capitaliseName(descr):
     words = descr.split(" ")
     capWords =  [ words[0].lower() ]
