@@ -173,7 +173,15 @@ class Peripheral:
     def parseResp(line):
         resp = {}
         for item in line.rstrip().split(' '):
-            (tag, tval) = item.split('=')
+
+            # diagnostic try:except for occasionally bogus helper output
+            try:
+                (tag, tval) = item.split('=')
+            except Exception as e:
+                print("ERROR processing {}: {}:{}".format(
+                        item, type(e).__name__, str(e)))
+                continue
+
             if len(tval)==0:
                 val = None
             elif tval[0]=="$" or tval[0]=="'":
