@@ -167,7 +167,7 @@ class KeypressSensor(SensorBase):
     dataUUID = UUID(0xFFE1)
 
     def __init__(self, periph):
-        SensorBase.__init__(self, periph)
+        SensorBase.__init__(self, periph, 'keypress')
 
     def enable(self):
         self.periph.writeCharacteristic(0x60, struct.pack('<bb', 0x01, 0x00))
