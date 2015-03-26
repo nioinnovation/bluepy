@@ -1,4 +1,4 @@
-from .btle import UUID, Peripheral
+from .btle import UUID, Peripheral, DefaultDelegate
 import struct
 import math
 
@@ -13,11 +13,13 @@ class SensorBase:
     def __init__(self, periph, ident):
         self.periph = periph
         self.ident = ident
-        self.service = self.periph.getServiceByUUID(self.svcUUID)
+        self.service = None
         self.ctrl = None
         self.data = None
 
     def enable(self):
+        if self.service is None:
+            self.service = self.periph.getServiceByUUID(self.svcUUID)
         if self.ctrl is None:
             self.ctrl = self.service.getCharacteristics(self.ctrlUUID) [0]
         if self.data is None:
@@ -160,44 +162,131 @@ class GyroscopeSensor(SensorBase):
         x_y_z = struct.unpack('<hhh', self.data.read())
         return tuple([ 250.0 * (v/32768.0) for v in x_y_z ])
 
-#class KeypressSensor(SensorBase):
-# TODO: only sends notifications, you can't poll it
-#    svcUUID = UUID(0xFFE0)
-# write 0100 to 0x60
-# get notifications on 5F
+class KeypressSensor(SensorBase):
+    svcUUID = UUID(0xFFE0)
+    dataUUID = UUID(0xFFE1)
+
+    def __init__(self, periph):
+        SensorBase.__init__(self, periph)
+
+    def enable(self):
+        self.periph.writeCharacteristic(0x60, struct.pack('<bb', 0x01, 0x00))
+
+    def disable(self):
+        self.periph.writeCharacteristic(0x60, struct.pack('<bb', 0x00, 0x00))
 
 class SensorTag(Peripheral):
     def __init__(self,addr):
         Peripheral.__init__(self,addr)
-        self.discoverServices()
+        # self.discoverServices()
         self.IRtemperature = IRTemperatureSensor(self)
         self.accelerometer = AccelerometerSensor(self)
         self.humidity = HumiditySensor(self)
         self.magnetometer = MagnetometerSensor(self)
         self.barometer = BarometerSensor(self)
         self.gyroscope = GyroscopeSensor(self)
-        # self.keypress = KeypressSensor(self)
+        self.keypress = KeypressSensor(self)
+
+
+class KeypressDelegate(DefaultDelegate):
+    BUTTON_L = 0x02
+    BUTTON_R = 0x01
+    ALL_BUTTONS = (BUTTON_L | BUTTON_R)
+
+    _button_desc = {
+        BUTTON_L : "Left button",
+        BUTTON_R : "Right button",
+        ALL_BUTTONS : "Both buttons"
+    }
+
+    def __init__(self):
+        DefaultDelegate.__init__(self)
+        self.lastVal = 0
+
+    def handleNotification(self, hnd, data):
+        # NB: only one source of notifications at present
+        # so we can ignore 'hnd'.
+        val = struct.unpack("B", data)[0]
+        down = (val & ~self.lastVal) & self.ALL_BUTTONS
+        if down != 0:
+            self.onButtonDown(down)
+        up = (~val & self.lastVal) & self.ALL_BUTTONS
+        if up != 0:
+            self.onButtonUp(up)
+        self.lastVal = val
+
+    def onButtonUp(self, but):
+        print ( "** " + self._button_desc[but] + " UP")
+
+    def onButtonDown(self, but):
+        print ( "** " + self._button_desc[but] + " DOWN")
 
 
 if __name__ == "__main__":
     import time
+    import sys
+    import argparse
 
-    def quickTest(sensor):
-        sensor.enable()
-        for i in range(10):
-            print("Result", sensor.read())
-            time.sleep(1.0)
-        sensor.disable()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('host', action='store',help='MAC of BT device')
+    parser.add_argument('-n', action='store', dest='count', default=0,
+            type=int, help="Number of times to loop data")
+    parser.add_argument('-t',action='store',type=float, default=5.0, help='time between polling')
+    parser.add_argument('-T','--temperature', action="store_true",default=False)
+    parser.add_argument('-A','--accelerometer', action='store_true',
+            default=False)
+    parser.add_argument('-H','--humidity', action='store_true', default=False)
+    parser.add_argument('-M','--magnetometer', action='store_true',
+            default=False)
+    parser.add_argument('-B','--barometer', action='store_true', default=False)
+    parser.add_argument('-G','--gyroscope', action='store_true', default=False)
+    parser.add_argument('-K','--keypress', action='store_true', default=False)
+    parser.add_argument('--all', action='store_true', default=False)
 
-    tag = SensorTag("BC:6A:29:AE:D2:BC")
+    arg = parser.parse_args(sys.argv[1:])
 
-    sensors = [tag.IRtemperature, tag.humidity, tag.barometer]
-    [ s.enable() for s in sensors ]
+    print('Connecting to ' + arg.host)
+    tag = SensorTag(arg.host)
 
+    # Enabling selected sensors
+    if arg.temperature or arg.all:
+        tag.IRtemperature.enable()
+    if arg.humidity or arg.all:
+        tag.humidity.enable()
+    if arg.barometer or arg.all:
+        tag.barometer.enable()
+    if arg.accelerometer or arg.all:
+        tag.accelerometer.enable()
+    if arg.magnetometer or arg.all:
+        tag.magnetometer.enable()
+    if arg.gyroscope or arg.all:
+        tag.gyroscope.enable()
+    if arg.keypress or arg.all:
+        tag.keypress.enable()
+        tag.setDelegate(KeypressDelegate())
+
+    # Some sensors (e.g., temperature, accelerometer) need some time for initialization.
+    # Not waiting here after enabling a sensor, the first read value might be empty or incorrect.
+    time.sleep(1.0)
+
+    counter=1
     while True:
-       ir, hum, baro = [ s.read() for s in sensors ]
-       print("IR", ir, "hum", hum, "baro", baro)
-       time.sleep(5.0)
+       if arg.temperature or arg.all:
+           print('Temp: ', tag.IRtemperature.read())
+       if arg.humidity or arg.all:
+           print("Humidity: ", tag.humidity.read())
+       if arg.barometer or arg.all:
+           print("Barometer: ", tag.barometer.read())
+       if arg.accelerometer or arg.all:
+           print("Accelerometer: ", tag.accelerometer.read())
+       if arg.magnetometer or arg.all:
+           print("Magnetometer: ", tag.magnetometer.read())
+       if arg.gyroscope or arg.all:
+           print("Gyroscope: ", tag.gyroscope.read())
+       if counter >= arg.count and arg.count != 0:
+           break
+       counter += 1
+       tag.waitForNotifications(arg.t)
 
     tag.disconnect()
     del tag
